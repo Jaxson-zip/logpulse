@@ -1,0 +1,14 @@
+# 构建产物
+/logpulse
+/logpulse.exe
+*.exe
+
+# 测试与覆盖率
+*.out
+*.test
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
