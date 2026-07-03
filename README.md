@@ -26,6 +26,28 @@ go build -o logpulse .
 ./logpulse --help
 ```
 
+### 一键构建脚本 scripts/build.sh
+
+脚本封装「本地编译二进制 + 构建 Docker 镜像」全流程,推荐使用。
+
+```bash
+# 基础用法:构建二进制与 logpulse:latest 镜像
+bash scripts/build.sh
+
+# 指定镜像标签
+bash scripts/build.sh --tag v1.0.0
+
+# 构建并推送到镜像仓库
+bash scripts/build.sh --tag v1.0.0 --push
+
+# 查看帮助
+bash scripts/build.sh --help
+```
+
+- 前置依赖:`go` 与 `docker` 命令必须存在,缺失时脚本报错退出
+- 构建产物:`bin/logpulse`(本地二进制)+ `logpulse:<tag>`(Docker 镜像)
+- 推送失败仅警告,不中断流程
+
 ## 使用示例
 
 ### 1. 基础行数与级别统计(通用格式)
@@ -124,6 +146,75 @@ docker run --rm -v "$PWD":/data logpulse analyze /data/access.log --format nginx
 - 运行阶段以非 root 用户 `app` 执行
 - 镜像体积约 15~18MB(< 20MB)
 
+### 容器编排 docker-compose.yml
+
+`docker-compose.yml` 定义 `logpulse` 服务,挂载宿主机 `./logs` 目录到容器 `/data`,通过 shell 循环每 60 秒全量分析 `/data/access.log`,将 JSON 报告原子写入 `/data/report.json`(先写临时文件再 `mv` 替换,分析失败时保留上一份有效报告),错误信息写入 `/data/analyze.err`。
+
+```bash
+# 前台启动(查看实时输出,Ctrl+C 停止)
+docker compose up
+
+# 后台启动
+docker compose up -d
+
+# 查看状态与停止
+docker compose ps
+docker compose down
+```
+
+服务配置要点:
+
+| 项 | 值 / 说明 |
+|---|---|
+| image | `logpulse:latest`(需先执行 `scripts/build.sh` 构建) |
+| volumes | `./logs:/data`,日志输入与报告输出共用该目录 |
+| command | `sh -c` 循环,每 60s 触发一次 `logpulse analyze`(批处理工具需读到 EOF 才输出,故用循环而非 `tail -F` 管道) |
+| restart | `unless-stopped` |
+| 健康检查 | 每 30s 执行一次,验证 `report.json` 存在且在近 120s 内更新过(`-mmin -2`,相对 60s 周期留边界余量);超时 10s、重试 3 次、启动宽限 60s |
+| 资源限制 | `mem_limit: 256m`、`cpus: 1.0`、`pids_limit: 100` |
+| 容器加固 | `read_only: true`(rootfs 只读,写仅落 /data 与 /tmp tmpfs)、`cap_drop: [ALL]`、`no-new-privileges` |
+| labels | `app=logpulse`、`version=1.0.0` |
+
+使用前需在 `./logs` 下放置待分析的日志文件(如 `access.log`),报告会输出到 `./logs/report.json`。
+
+## 部署运维
+
+`scripts/deploy.sh` 封装 `docker compose` 的启停、日志、状态查看等运维操作。
+
+```bash
+# 启动服务(docker compose up -d)并打印状态
+bash scripts/deploy.sh start
+
+# 停止并移除容器(docker compose down)
+bash scripts/deploy.sh stop
+
+# 重启:先 stop 再 start
+bash scripts/deploy.sh restart
+
+# 实时查看日志(docker compose logs -f --tail=100)
+bash scripts/deploy.sh logs
+
+# 查看容器状态与 report.json 最近更新时间
+bash scripts/deploy.sh status
+
+# 查看用法说明
+bash scripts/deploy.sh --help
+```
+
+子命令说明:
+
+| 子命令 | 行为 |
+|---|---|
+| `start` | 校验镜像存在 → 确保 `./logs` 目录存在并按容器 `app` 用户对齐属主 → `docker compose up -d` → 打印 `docker compose ps` |
+| `stop` | `docker compose down`,停止并移除容器与网络 |
+| `restart` | 先 `stop` 再 `start` |
+| `logs` | `docker compose logs -f --tail=100`,实时跟踪日志 |
+| `status` | `docker compose ps` 并打印 `report.json` 最近更新时间 |
+| (无参数) | 打印 usage 用法,退出码 1 |
+
+- 首次运行前请先执行 `scripts/build.sh` 构建镜像
+- 可选环境变量 `IMAGE_ID`:设为镜像 ID(`docker image inspect logpulse:latest --format '{{.Id}}'` 的输出),`start` 时校验实际镜像一致,防止可变标签 `:latest` 被替换后部署不一致镜像
+
 ## 项目结构
 
 ```
@@ -138,8 +229,16 @@ logpulse/
 │   ├── filter/                 # 时间/级别过滤
 │   ├── alert/                  # 连续 ERROR 检测
 │   └── report/                 # JSON 报告结构化
-├── Dockerfile
-├── .dockerignore
+├── scripts/
+│   ├── build.sh                # 一键构建(编译二进制 + 构建镜像)
+│   └── deploy.sh               # 部署运维(启停/日志/状态)
+├── docker-compose.yml          # 容器编排(挂载日志、周期分析、健康检查)
+├── Dockerfile                  # 多阶段镜像构建
+├── .dockerignore               # 构建忽略清单
+├── .gitignore                  # Git 忽略清单
+├── .gitattributes              # 行尾归一化(*.sh 强制 LF)
+├── go.mod
+├── go.sum
 └── README.md
 ```
 
