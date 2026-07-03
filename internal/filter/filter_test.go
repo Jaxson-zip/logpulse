@@ -104,7 +104,10 @@ func TestFilterKeep(t *testing.T) {
 	}{
 		{"in_range_matching_level", "2026-07-01 10:00:00 [ERROR] x", "ERROR", true},
 		{"in_range_wrong_level", "2026-07-01 10:00:00 [INFO] x", "INFO", false},
-		{"out_of_range", "2026-07-03 10:00:00 [ERROR] x", "ERROR", false},
+		{"out_of_range_after_to", "2026-07-03 10:00:00 [ERROR] x", "ERROR", false},
+		{"before_from_range", "2026-06-30 10:00:00 [ERROR] x", "ERROR", false},
+		{"boundary_at_from_start", "2026-07-01 00:00:00 [ERROR] x", "ERROR", true},
+		{"boundary_at_to_end", "2026-07-02 23:59:59 [ERROR] x", "ERROR", true},
 		{"no_time_with_time_filter", "no timestamp here [ERROR]", "ERROR", false},
 	}
 	for _, tt := range tests {
@@ -124,4 +127,37 @@ func TestFilterZeroValueKeepsAll(t *testing.T) {
 	if !reflect.DeepEqual(f.Levels, []string(nil)) {
 		t.Error("zero-value Filter Levels should be nil")
 	}
+}
+
+func TestFilterSingleBound(t *testing.T) {
+	fromOnly := &Filter{From: mustParse("2026-07-01")}
+	toOnly := &Filter{To: mustParse("2026-07-02")}
+	tests := []struct {
+		name  string
+		f     *Filter
+		line  string
+		level string
+		want  bool
+	}{
+		{"from_only_before", fromOnly, "2026-06-30 10:00:00 [ERROR] x", "ERROR", false},
+		{"from_only_at", fromOnly, "2026-07-01 00:00:00 [ERROR] x", "ERROR", true},
+		{"from_only_after", fromOnly, "2026-07-05 00:00:00 [ERROR] x", "ERROR", true},
+		{"to_only_before", toOnly, "2026-06-30 10:00:00 [ERROR] x", "ERROR", true},
+		{"to_only_after", toOnly, "2026-07-05 00:00:00 [ERROR] x", "ERROR", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.Keep(tt.line, tt.level); got != tt.want {
+				t.Errorf("Keep(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+func mustParse(s string) time.Time {
+	t, err := ParseTimeBound(s, false)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
