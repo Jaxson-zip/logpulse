@@ -1,0 +1,24 @@
+# 版本控制与 IDE
+.git
+.gitignore
+.github
+.idea
+.vscode
+
+# 文档与考核材料(非构建必需)
+*.md
+docs/
+
+# 构建产物与测试缓存
+logpulse
+logpulse.exe
+*.exe
+*.out
+*.test
+coverage.out
+
+# 本地环境与系统文件
+.env
+.env.*
+.DS_Store
+Thumbs.db
