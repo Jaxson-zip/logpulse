@@ -8,6 +8,7 @@ import (
 
 	"logpulse/internal/filter"
 	"logpulse/internal/parse"
+	"logpulse/internal/report"
 	"logpulse/internal/stat"
 
 	"github.com/spf13/cobra"
@@ -21,12 +22,13 @@ var analyzeCmd = &cobra.Command{
 }
 
 var (
-	formatFlag string
-	topNFlag   int
-	fromFlag   string
-	toFlag     string
-	levelFlag  string
-	levels     = []string{"ERROR", "WARN", "INFO", "DEBUG", "unknown"}
+	formatFlag     string
+	topNFlag       int
+	fromFlag       string
+	toFlag         string
+	levelFlag      string
+	formatOutFlag  string
+	levels         = []string{"ERROR", "WARN", "INFO", "DEBUG", "unknown"}
 )
 
 func init() {
@@ -35,11 +37,15 @@ func init() {
 	analyzeCmd.Flags().StringVar(&fromFlag, "from", "", "起始时间(RFC3339 或 YYYY-MM-DD)")
 	analyzeCmd.Flags().StringVar(&toFlag, "to", "", "结束时间(RFC3339 或 YYYY-MM-DD)")
 	analyzeCmd.Flags().StringVar(&levelFlag, "level", "", "级别过滤(逗号分隔,如 ERROR,WARN)")
+	analyzeCmd.Flags().StringVar(&formatOutFlag, "format-output", "table", "输出格式: table|json")
 	rootCmd.AddCommand(analyzeCmd)
 }
 
 // runAnalyze 根据格式分发到对应解析器;统一构造过滤条件。
 func runAnalyze(cmd *cobra.Command, args []string) error {
+	if formatOutFlag != "table" && formatOutFlag != "json" {
+		return fmt.Errorf("不支持的输出格式: %s (可选 table|json)", formatOutFlag)
+	}
 	path := args[0]
 	f, err := buildFilter()
 	if err != nil {
@@ -58,6 +64,24 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		return analyzeNginx(path, file, f)
 	default:
 		return fmt.Errorf("不支持的格式: %s (可选 generic|nginx)", formatFlag)
+	}
+}
+
+// emit 根据 --format-output 渲染并打印报告;json 模式输出结构化 JSON。
+func emit(r *report.Report) error {
+	switch formatOutFlag {
+	case "json":
+		out, err := report.Render(r)
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+		return nil
+	case "table", "":
+		printReportTable(r)
+		return nil
+	default:
+		return fmt.Errorf("不支持的输出格式: %s (可选 table|json)", formatOutFlag)
 	}
 }
 
@@ -82,17 +106,31 @@ func buildFilter() (*filter.Filter, error) {
 	return &filter.Filter{From: from, To: to, Levels: lvls}, nil
 }
 
-// analyzeGeneric 解析通用 [LEVEL] 格式,应用过滤后输出总行数与级别计数。
+// analyzeGeneric 解析通用 [LEVEL] 格式,应用过滤后构建并输出报告。
 func analyzeGeneric(path string, file *os.File, f *filter.Filter) error {
 	total, counts, err := scanLog(file, f)
 	if err != nil {
 		return fmt.Errorf("读取文件 %s 失败: %w", path, err)
 	}
-	fmt.Printf("文件 %s 总行数: %d\n", path, total)
+	r := &report.Report{
+		Summary:     report.Summary{Format: "generic", TotalLines: total, Parsed: total, Skipped: 0},
+		LevelCounts: counts,
+		TopIPs:      []report.TopItem{},
+		TopPaths:    []report.TopItem{},
+		Alerts:      []report.Alert{},
+	}
 	if total == 0 {
+		if formatOutFlag == "json" {
+			return emit(r)
+		}
+		fmt.Printf("文件 %s 总行数: %d\n", path, total)
 		fmt.Println("提示: 过滤后无匹配日志行")
 		return nil
 	}
+	if formatOutFlag == "json" {
+		return emit(r)
+	}
+	fmt.Printf("文件 %s 总行数: %d\n", path, total)
 	printLevelCounts(counts)
 	return nil
 }
@@ -134,7 +172,7 @@ func printLevelCounts(counts map[string]int) {
 	}
 }
 
-// analyzeNginx 解析 nginx combined 格式,应用过滤后统计 IP/路径并输出 Top N。
+// analyzeNginx 解析 nginx combined 格式,应用过滤后构建并输出报告。
 func analyzeNginx(path string, file *os.File, f *filter.Filter) error {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -158,6 +196,16 @@ func analyzeNginx(path string, file *os.File, f *filter.Filter) error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("读取文件 %s 失败: %w", path, err)
 	}
+	r := &report.Report{
+		Summary:     report.Summary{Format: "nginx", TotalLines: parsed + skipped, Parsed: parsed, Skipped: skipped},
+		LevelCounts: newLevelCounts(),
+		TopIPs:      report.FromTopN(stat.TopN(ipCounts, topNFlag)),
+		TopPaths:    report.FromTopN(stat.TopN(pathCounts, topNFlag)),
+		Alerts:      []report.Alert{},
+	}
+	if formatOutFlag == "json" {
+		return emit(r)
+	}
 	fmt.Printf("文件 %s (nginx 模式) 总行数: %d\n", path, parsed+skipped)
 	fmt.Printf("成功解析: %d 行,跳过(解析失败): %d 行\n", parsed, skipped)
 	if parsed == 0 {
@@ -167,6 +215,34 @@ func analyzeNginx(path string, file *os.File, f *filter.Filter) error {
 	printTopN("高频 IP Top", stat.TopN(ipCounts, topNFlag))
 	printTopN("高频路径 Top", stat.TopN(pathCounts, topNFlag))
 	return nil
+}
+
+// printReportTable 以表格风格打印报告摘要与 Top N 列表。
+func printReportTable(r *report.Report) {
+	fmt.Printf("格式: %s  总行数: %d  解析: %d  跳过: %d\n",
+		r.Summary.Format, r.Summary.TotalLines, r.Summary.Parsed, r.Summary.Skipped)
+	if len(r.LevelCounts) > 0 {
+		printLevelCounts(r.LevelCounts)
+	}
+	printTopN("高频 IP Top", topNFromItems(r.TopIPs))
+	printTopN("高频路径 Top", topNFromItems(r.TopPaths))
+	if len(r.Alerts) == 0 {
+		fmt.Println("告警: (无)")
+		return
+	}
+	fmt.Println("告警:")
+	for i, a := range r.Alerts {
+		fmt.Printf("  %d. 行 %d-%d  连续 %d 次\n", i+1, a.StartLine, a.EndLine, a.Count)
+	}
+}
+
+// topNFromItems 将 TopItem 转回 stat.Entry 以复用 printTopN。
+func topNFromItems(items []report.TopItem) []stat.Entry {
+	entries := make([]stat.Entry, 0, len(items))
+	for _, it := range items {
+		entries = append(entries, stat.Entry{Key: it.Key, Count: it.Count})
+	}
+	return entries
 }
 
 // printTopN 输出 Top N 条目,标题带条数。
