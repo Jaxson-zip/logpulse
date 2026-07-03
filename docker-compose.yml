@@ -1,0 +1,53 @@
+# logpulse 容器编排
+# 挂载宿主机 ./logs 到容器 /data,通过 shell 循环周期性触发批处理分析,
+# 每 60 秒全量分析 /data/access.log 并覆盖输出 /data/report.json。
+services:
+  logpulse:
+    image: logpulse:latest
+    # Dockerfile 声明了 ENTRYPOINT ["logpulse"],此处需覆盖 entrypoint 为 sh -c,
+    # 使 command 中的循环脚本作为 shell 脚本执行,而非被追加到 logpulse 之后
+    # (否则实际执行的是 "logpulse sh -c '...'" 导致参数解析错误)。
+    entrypoint: ["sh", "-c"]
+    # logpulse 是批处理工具,需读到 EOF 才输出报告,故用循环周期触发而非 tail -F 管道
+    # (tail -F 永不结束,stdin 不到 EOF,工具会一直挂起无法输出报告)。
+    # 原子写:先输出到 /data/report.json.tmp,仅当 logpulse 成功(退出 0)才 mv 原子替换,
+    # 失败时保留上一份有效 report.json,避免失败时 report.json 被截空却被 healthcheck 误判 healthy。
+    # stderr 同样先写 .tmp:失败(非零退出)时才落盘 analyze.err,保留最近一次失败原因;
+    # 成功时丢弃旧错误,analyze.err 残留上一周期错误会误导,故成功时清空。
+    # || true:日志文件不存在或解析出错时不中断循环,等待下一周期重试。
+    # 用列表形式给出单元素,确保整段循环脚本作为单个参数传给 sh -c,
+    # 避免字符串形式被 compose 按空白拆分成多个参数而破坏脚本语义。
+    # 注:全量分析(每 60s 重读整个文件到 EOF)为任务规格要求,对持续增长的大日志
+    # 累计 I/O 为 O(T²);若需增量处理需为 logpulse 增加读取 offset 能力(超出本文件范围)。
+    command:
+      - "while true; do if logpulse analyze /data/access.log --format-output=json > /data/report.json.tmp 2>/data/analyze.err.tmp; then mv /data/report.json.tmp /data/report.json && : > /data/analyze.err; else rm -f /data/report.json.tmp && mv /data/analyze.err.tmp /data/analyze.err; fi; sleep 60; done"
+    volumes:
+      # 宿主机 ./logs 映射到容器 /data;report.json/analyze.err 也会落到宿主机 ./logs/
+      - ./logs:/data
+    restart: unless-stopped
+    # 资源限制:避免大日志全量重扫时内存/CPU 无上限导致容器或宿主 OOM
+    mem_limit: 256m
+    cpus: "1.0"
+    pids_limit: 100
+    # 容器加固:解析来自公网的 nginx 日志(不可信输入),收紧权限与可写面
+    # read_only 使 rootfs 只读(写仅落 /data bind mount);tmpfs 供 shell 临时文件使用;
+    # cap_drop 全部 capabilities;no-new-privileges 禁止提权。
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      app: logpulse
+      version: 1.0.0
+    healthcheck:
+      # 检查 report.json 是否在 120 秒内更新过;窗口放宽到 -mmin -2 留出边界余量,
+      # 避免与 sleep 60 的 60s 边界发生单次漏判(retries=3 仍可吸收连续失败)。
+      # 仅用 test/find/grep,不依赖 curl 等额外工具。
+      test: ["CMD-SHELL", "test -f /data/report.json && find /data/report.json -mmin -2 | grep -q ."]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
