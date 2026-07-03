@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"logpulse/internal/parse"
+	"logpulse/internal/stat"
 
 	"github.com/spf13/cobra"
 )
@@ -19,11 +20,13 @@ var analyzeCmd = &cobra.Command{
 
 var (
 	formatFlag string
+	topNFlag   int
 	levels     = []string{"ERROR", "WARN", "INFO", "DEBUG", "unknown"}
 )
 
 func init() {
 	analyzeCmd.Flags().StringVar(&formatFlag, "format", "generic", "日志格式: generic|nginx")
+	analyzeCmd.Flags().IntVarP(&topNFlag, "n", "n", 10, "Top N 输出条数(nginx 模式生效)")
 	rootCmd.AddCommand(analyzeCmd)
 }
 
@@ -90,48 +93,41 @@ func printLevelCounts(counts map[string]int) {
 	}
 }
 
-// nginxEntry 保存一行 nginx 日志的提取结果。
-type nginxEntry struct {
-	IP     string
-	Method string
-	Path   string
-}
-
-// analyzeNginx 解析 nginx combined 格式,输出解析计数与 IP/路径示例。
+// analyzeNginx 解析 nginx combined 格式,统计 IP 与路径频次并输出 Top N。
 func analyzeNginx(path string, file *os.File) error {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var parsed, skipped int
-	var sample []nginxEntry
-	const sampleLimit = 10
+	ipCounts := make(map[string]int)
+	pathCounts := make(map[string]int)
 	for scanner.Scan() {
-		ip, method, p, ok := parse.ParseNginx(scanner.Text())
+		ip, _, p, ok := parse.ParseNginx(scanner.Text())
 		if !ok {
 			skipped++
 			continue
 		}
 		parsed++
-		if len(sample) < sampleLimit {
-			sample = append(sample, nginxEntry{ip, method, p})
-		}
+		ipCounts[ip]++
+		pathCounts[p]++
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("读取文件 %s 失败: %w", path, err)
 	}
 	fmt.Printf("文件 %s (nginx 模式) 总行数: %d\n", path, parsed+skipped)
 	fmt.Printf("成功解析: %d 行,跳过(解析失败): %d 行\n", parsed, skipped)
-	printNginxSample(sample)
+	printTopN("高频 IP Top", stat.TopN(ipCounts, topNFlag))
+	printTopN("高频路径 Top", stat.TopN(pathCounts, topNFlag))
 	return nil
 }
 
-// printNginxSample 打印前若干条 IP/方法/路径提取结果。
-func printNginxSample(sample []nginxEntry) {
-	if len(sample) == 0 {
-		fmt.Println("无有效解析结果")
+// printTopN 输出 Top N 条目,标题带条数。
+func printTopN(title string, entries []stat.Entry) {
+	fmt.Printf("%s %d:\n", title, len(entries))
+	if len(entries) == 0 {
+		fmt.Println("  (无数据)")
 		return
 	}
-	fmt.Println("IP 与请求路径示例:")
-	for _, e := range sample {
-		fmt.Printf("  %-15s %-6s %s\n", e.IP, e.Method, e.Path)
+	for i, e := range entries {
+		fmt.Printf("  %2d. %-30s %d\n", i+1, e.Key, e.Count)
 	}
 }
