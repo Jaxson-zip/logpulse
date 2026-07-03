@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"logpulse/internal/alert"
 	"logpulse/internal/filter"
 	"logpulse/internal/parse"
 	"logpulse/internal/report"
@@ -22,13 +23,14 @@ var analyzeCmd = &cobra.Command{
 }
 
 var (
-	formatFlag     string
-	topNFlag       int
-	fromFlag       string
-	toFlag         string
-	levelFlag      string
-	formatOutFlag  string
-	levels         = []string{"ERROR", "WARN", "INFO", "DEBUG", "unknown"}
+	formatFlag        string
+	topNFlag          int
+	fromFlag          string
+	toFlag            string
+	levelFlag         string
+	formatOutFlag     string
+	alertThresholdFlag int
+	levels            = []string{"ERROR", "WARN", "INFO", "DEBUG", "unknown"}
 )
 
 func init() {
@@ -38,6 +40,7 @@ func init() {
 	analyzeCmd.Flags().StringVar(&toFlag, "to", "", "结束时间(RFC3339 或 YYYY-MM-DD)")
 	analyzeCmd.Flags().StringVar(&levelFlag, "level", "", "级别过滤(逗号分隔,如 ERROR,WARN)")
 	analyzeCmd.Flags().StringVar(&formatOutFlag, "format-output", "table", "输出格式: table|json")
+	analyzeCmd.Flags().IntVar(&alertThresholdFlag, "alert-threshold", 5, "连续 ERROR 告警阈值")
 	rootCmd.AddCommand(analyzeCmd)
 }
 
@@ -108,7 +111,8 @@ func buildFilter() (*filter.Filter, error) {
 
 // analyzeGeneric 解析通用 [LEVEL] 格式,应用过滤后构建并输出报告。
 func analyzeGeneric(path string, file *os.File, f *filter.Filter) error {
-	total, counts, err := scanLog(file, f)
+	det := alert.NewDetector(alertThresholdFlag)
+	total, counts, err := scanLog(file, f, det)
 	if err != nil {
 		return fmt.Errorf("读取文件 %s 失败: %w", path, err)
 	}
@@ -117,7 +121,7 @@ func analyzeGeneric(path string, file *os.File, f *filter.Filter) error {
 		LevelCounts: counts,
 		TopIPs:      []report.TopItem{},
 		TopPaths:    []report.TopItem{},
-		Alerts:      []report.Alert{},
+		Alerts:      toReportAlerts(det.Spans()),
 	}
 	if total == 0 {
 		if formatOutFlag == "json" {
@@ -132,22 +136,41 @@ func analyzeGeneric(path string, file *os.File, f *filter.Filter) error {
 	}
 	fmt.Printf("文件 %s 总行数: %d\n", path, total)
 	printLevelCounts(counts)
+	printAlerts(r.Alerts)
 	return nil
 }
 
-// scanLog 逐行扫描日志,应用过滤后统计总行数与各级别计数;单行最大 1MB。
-func scanLog(file *os.File, f *filter.Filter) (int, map[string]int, error) {
+// toReportAlerts 将 alert.Span 列表转为 report.Alert 列表;恒返回非 nil。
+func toReportAlerts(spans []alert.Span) []report.Alert {
+	alerts := make([]report.Alert, 0, len(spans))
+	for _, s := range spans {
+		alerts = append(alerts, report.Alert{
+			StartLine: s.StartLine,
+			EndLine:   s.EndLine,
+			Count:     s.Count,
+		})
+	}
+	return alerts
+}
+
+// scanLog 逐行扫描日志,应用过滤后统计总行数与各级别计数;
+// det 非 nil 时同步驱动连续 ERROR 检测。单行最大 1MB。
+func scanLog(file *os.File, f *filter.Filter, det *alert.Detector) (int, map[string]int, error) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	counts := newLevelCounts()
 	total := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !f.Keep(line, parse.ParseLevel(line)) {
+		lvl := parse.ParseLevel(line)
+		if !f.Keep(line, lvl) {
 			continue
 		}
 		total++
-		counts[parse.ParseLevel(line)]++
+		counts[lvl]++
+		if det != nil {
+			det.Observe(lvl == "ERROR")
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, nil, err
@@ -226,12 +249,17 @@ func printReportTable(r *report.Report) {
 	}
 	printTopN("高频 IP Top", topNFromItems(r.TopIPs))
 	printTopN("高频路径 Top", topNFromItems(r.TopPaths))
-	if len(r.Alerts) == 0 {
+	printAlerts(r.Alerts)
+}
+
+// printAlerts 打印告警列表;无告警时输出占位提示。
+func printAlerts(alerts []report.Alert) {
+	if len(alerts) == 0 {
 		fmt.Println("告警: (无)")
 		return
 	}
 	fmt.Println("告警:")
-	for i, a := range r.Alerts {
+	for i, a := range alerts {
 		fmt.Printf("  %d. 行 %d-%d  连续 %d 次\n", i+1, a.StartLine, a.EndLine, a.Count)
 	}
 }
