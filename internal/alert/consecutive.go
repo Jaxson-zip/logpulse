@@ -58,10 +58,24 @@ func (d *Detector) flush() {
 
 // Spans 返回所有告警区间;会先 flush 当前未结束的区间。
 // 返回值始终为非 nil 切片(无告警时为空切片)。
+// 调用后会清空已完成区间与当前进行中的区间,适合一次性批处理取结果。
 func (d *Detector) Spans() []Span {
 	d.flush()
 	if d.spans == nil {
 		return []Span{}
 	}
 	return d.spans
+}
+
+// Peek 返回当前已完成的告警区间副本,不含未结束的当前区间,且不修改任何内部状态。
+// 可重复调用并返回相同结果;返回的切片为副本,调用方修改不影响内部状态。
+// 适合流式监控场景下的只读状态查询(如周期性触发时检查历史告警而不丢失正在累积的区间)。
+// 与 Spans() 的差异:Peek 不 flush 当前正在累积的区间,也不清空已完成区间。
+func (d *Detector) Peek() []Span {
+	if len(d.spans) == 0 {
+		return []Span{}
+	}
+	out := make([]Span, len(d.spans))
+	copy(out, d.spans)
+	return out
 }

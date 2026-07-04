@@ -130,3 +130,78 @@ func TestLongRunExceedsThreshold(t *testing.T) {
 		t.Errorf("span = %v, want %v", got[0], want)
 	}
 }
+
+func TestPeekNoAlerts(t *testing.T) {
+	d := NewDetector(3)
+	d.Observe(false)
+	d.Observe(false)
+	got := d.Peek()
+	if len(got) != 0 {
+		t.Errorf("Peek() = %v, want empty", got)
+	}
+	if got == nil {
+		t.Error("Peek() returned nil, want non-nil empty slice")
+	}
+}
+
+func TestPeekReturnsCompletedExcludesInProgress(t *testing.T) {
+	d := NewDetector(3)
+	// E E E . → flush at '.', completed span {1,3,3} in d.spans
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(false)
+	// 新的 in-progress 区间 E E(未结束,不应出现在 Peek 结果中)
+	d.Observe(true)
+	d.Observe(true)
+	got := d.Peek()
+	want := []Span{{StartLine: 1, EndLine: 3, Count: 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Peek() = %v, want %v (in-progress excluded)", got, want)
+	}
+}
+
+func TestPeekRepeatedConsistent(t *testing.T) {
+	d := NewDetector(3)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(false)
+	first := d.Peek()
+	second := d.Peek()
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("repeated Peek inconsistent: %v vs %v", first, second)
+	}
+}
+
+func TestPeekDoesNotBreakSpans(t *testing.T) {
+	d := NewDetector(3)
+	// in-progress 区间 E E E E(count=4,未结束)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(true)
+	_ = d.Peek() // 不应破坏状态
+	got := d.Spans()
+	want := []Span{{StartLine: 1, EndLine: 4, Count: 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Spans() after Peek() = %v, want %v", got, want)
+	}
+}
+
+func TestPeekReturnsCopy(t *testing.T) {
+	d := NewDetector(3)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(true)
+	d.Observe(false)
+	got := d.Peek()
+	if len(got) != 1 {
+		t.Fatalf("Peek() len = %d, want 1", len(got))
+	}
+	got[0].Count = 999 // 修改返回的切片
+	again := d.Peek()
+	if again[0].Count != 3 {
+		t.Errorf("internal state mutated by caller: Peek() Count = %d, want 3", again[0].Count)
+	}
+}

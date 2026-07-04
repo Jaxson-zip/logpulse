@@ -379,6 +379,53 @@ func TestAnalyzeNginxNoParsed(t *testing.T) {
 	}
 }
 
+func TestAnalyzeNginxLevelFilter(t *testing.T) {
+	resetFlags()
+	content := `1.2.3.4 - - [01/Jul/2026:10:00:00 +0800] "GET /x HTTP/1.1" 200 1 "-" "M"
+5.6.7.8 - - [01/Jul/2026:10:00:05 +0800] "POST /y HTTP/1.1" 500 2 "-" "c"
+`
+	f, p := writeTemp(t, content)
+	defer f.Close()
+	formatOutFlag = "json"
+	levelFlag = "ERROR"
+	fltr, _ := buildFilter()
+	out := captureStdout(t, func() {
+		if err := analyzeNginx(p, f, fltr); err != nil {
+			t.Fatalf("analyzeNginx err = %v", err)
+		}
+	})
+	var r report.Report
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, out)
+	}
+	// nginx 行无 [LEVEL] 标记,ParseLevel 返回 "unknown",不匹配 --level ERROR → 全部被过滤
+	if r.Summary.Parsed != 0 {
+		t.Errorf("with --level ERROR, parsed = %d, want 0 (nginx 行无 [LEVEL],被级别过滤丢弃)", r.Summary.Parsed)
+	}
+}
+
+func TestAnalyzeNginxNoLevelSkipsParseLevel(t *testing.T) {
+	resetFlags()
+	content := `1.2.3.4 - - [01/Jul/2026:10:00:00 +0800] "GET /x HTTP/1.1" 200 1 "-" "M"
+`
+	f, p := writeTemp(t, content)
+	defer f.Close()
+	formatOutFlag = "json"
+	fltr, _ := buildFilter()
+	out := captureStdout(t, func() {
+		if err := analyzeNginx(p, f, fltr); err != nil {
+			t.Fatalf("analyzeNginx err = %v", err)
+		}
+	})
+	var r report.Report
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, out)
+	}
+	if r.Summary.Parsed != 1 {
+		t.Errorf("without --level, parsed = %d, want 1 (无级别过滤应保留全部解析行)", r.Summary.Parsed)
+	}
+}
+
 func TestRunAnalyzeErrors(t *testing.T) {
 	t.Run("bad_format_output", func(t *testing.T) {
 		resetFlags()

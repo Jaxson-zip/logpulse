@@ -202,6 +202,9 @@ func analyzeNginx(path string, file *os.File, f *filter.Filter) error {
 	var parsed, skipped int
 	ipCounts := make(map[string]int)
 	pathCounts := make(map[string]int)
+	// 惰性求值:nginx combined 格式本身不含 [LEVEL] 标记,仅当用户配置了 --level 过滤时
+	// 才调用 ParseLevel(触发正则),否则跳过级别检查,避免对每行做冗余正则匹配。
+	levelFiltered := len(f.Levels) > 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		ip, _, p, ok := parse.ParseNginx(line)
@@ -209,7 +212,11 @@ func analyzeNginx(path string, file *os.File, f *filter.Filter) error {
 			skipped++
 			continue
 		}
-		if !f.Keep(line, parse.ParseLevel(line)) {
+		lvl := ""
+		if levelFiltered {
+			lvl = parse.ParseLevel(line)
+		}
+		if !f.Keep(line, lvl) {
 			continue
 		}
 		parsed++
